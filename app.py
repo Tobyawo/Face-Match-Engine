@@ -18,6 +18,20 @@ def preprocess_image(image):
     image = cv.resize(image, (600, 600))
     return image
 
+# Function to register a user
+def register_user(email, password):
+    if not email or not password:
+        return {"message": "Email and password are required."}, 400
+
+    users = read_users()
+    if any(user['email'] == email for user in users):
+        return {"message": "User already exists."}, 400
+
+    users.append({'email': email, 'password': password})
+    write_users(users)
+
+    return {"message": "User registered successfully!"}, 201
+
 def face_detector(image):
     # Add your face detection logic here
     face_cascade = cv.CascadeClassifier(cv.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -34,12 +48,15 @@ def train():
     password = data.get('password')
     images = data.get('images')
 
+    # Validate email and password
     if not email or not password:
         return jsonify({"error": "Email or password missing"}), 400
 
+    # Validate provided images
     if not images:
         return jsonify({"error": "No images provided"}), 400
 
+    # Ensure upload folder exists
     if not os.path.exists(UPLOAD_FOLDER):
         os.makedirs(UPLOAD_FOLDER)
 
@@ -47,11 +64,9 @@ def train():
     faceFound = False
 
     for img_str in images:
-        # Remove the data URL scheme
+        # Remove data URL scheme and adjust padding for base64 string
         if img_str.startswith('data:image/png;base64,'):
             img_str = img_str.replace('data:image/png;base64,', '')
-
-        # Add padding if needed
         padding = len(img_str) % 4
         if padding:
             img_str += '=' * (4 - padding)
@@ -65,6 +80,7 @@ def train():
         if img is None:
             return jsonify({"error": "Error decoding image"}), 400
 
+        # Convert image to grayscale and detect faces
         gray_img = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
         face, coord = face_detector(gray_img)
         if face is not None:
@@ -77,7 +93,8 @@ def train():
             count += 1
             print(f"No face detected in image {count}")
 
-    if faceFound==False :
+    # Ensure at least one face was detected
+    if not faceFound:
         return jsonify({"error": "No faces detected"}), 400
 
     data_path = UPLOAD_FOLDER
@@ -87,13 +104,12 @@ def train():
     labels_to_name = {}
 
     for i, file in enumerate(onlyfiles):
-        print("======== " + file + " ==== " )
-        
+        print(f"Processing file: {file}")
         image_path = os.path.join(data_path, file)
         img = cv.imread(image_path, cv.IMREAD_GRAYSCALE)
         if img is None:
             continue
-        # Ensure all images are the same size
+        # Resize images to a uniform size
         if img.shape != (600, 600):
             img = cv.resize(img, (600, 600))
         training_data.append(np.asarray(img, dtype=np.uint8))
@@ -101,7 +117,7 @@ def train():
         file_email, _ = file.split("_")
         labels_to_name[i] = {"email": file_email, "password": password}
 
-    # Debug print statements to check the content before conversion
+    # Debug statements for training data
     print("Training data before conversion to numpy array:", [td.shape for td in training_data])
     print("Labels before conversion to numpy array:", labels)
 
@@ -113,14 +129,35 @@ def train():
     except Exception as e:
         return jsonify({"error": f"Error converting to numpy array: {str(e)}"}), 400
 
-    model = cv.face.LBPHFaceRecognizer_create()
-    model.train(training_data, labels)
-    model.write("trainer/model.xml")
+    try:
+        # Train the face recognition model
+        model = cv.face.LBPHFaceRecognizer_create()
+        model.train(training_data, labels)
+        model.write("trainer/model.xml")
 
-    with open("labels_to_name.json", "w") as write_file:
-        json.dump(labels_to_name, write_file)
-
-    return jsonify({"message": "Model trained successfully"})
+        # Save label-to-name mapping with error handling
+        try:
+            with open("labels_to_name.json", "w") as write_file:
+                json.dump(labels_to_name, write_file)
+                # registration_response = register_user(file_email, password)
+                # return jsonify({"message": "Model trained successfully"})
+        except Exception as e:
+            return jsonify({"error": f"Error writing to JSON file: {str(e)}"}), 500
+    
+        # Register the user after training
+        registration_response, status_code = register_user(email, password)
+        if status_code == 201:
+            return jsonify({
+                "message": "Model trained successfully and user registered!",
+                "registration_message": registration_response['message']
+            })
+        else:
+            return jsonify({
+                "message": "Model trained successfully, but registration failed.",
+                "registration_error": registration_response['message']
+            }), 400
+    except Exception as e:
+        return jsonify({"error": f"Error during model training: {str(e)}"}), 500
 
 
 
@@ -194,8 +231,73 @@ def recognize():
         matched_id = str(results[0])
         email = labels_to_name[matched_id]["email"]
         password = labels_to_name[matched_id]["password"]
-        print("result is " + confidence)
+        print("result is " + str(confidence))
         return jsonify({"email": email, "confidence": confidence, "password": password})
+    
+
+
+USERS_FILE_PATH = './users/users.json'
+
+
+def read_users():
+    # Check if the file exists and is not empty
+    if not os.path.exists(USERS_FILE_PATH) or os.path.getsize(USERS_FILE_PATH) == 0:
+        return []  # Return an empty list if the file does not exist or is empty
+
+    try:
+        with open(USERS_FILE_PATH, 'r') as file:
+            return json.load(file)  # Try loading the JSON data
+    except json.JSONDecodeError:
+        # Handle JSON decoding errors, such as when the file is empty or malformed
+        print("Error: Failed to read users.json, returning empty user list.")
+        return []  # Return an empty list if there's a JSON decoding error
+
+# Helper function to write users to the file
+def write_users(users):
+    with open(USERS_FILE_PATH, 'w') as file:
+        json.dump(users, file, indent=4)
+
+# Endpoint to register a new user
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({'message': 'Email and password are required.'}), 400
+
+    users = read_users()
+    if any(user['email'] == email for user in users):
+        return jsonify({'message': 'User already exists.'}), 400
+
+    users.append({'email': email, 'password': password})
+    write_users(users)
+
+    return jsonify({'message': 'User registered successfully!'}), 201
+
+
+
+
+# Endpoint to login a user
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({'message': 'Email and password are required.'}), 400
+
+    users = read_users()
+    user = next((user for user in users if user['email'] == email and user['password'] == password), None)
+
+    if user:
+        return jsonify({'message': 'Login successful!'}), 200
+    else:
+        return jsonify({'message': 'Invalid email or password.'}), 401
+
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5005))
